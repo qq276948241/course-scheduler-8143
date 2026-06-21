@@ -10,17 +10,23 @@ const {
   buildDateQuery,
   buildTopListPipeline,
   buildGroupByAggregate,
-  buildDailyDistributionPipeline
+  buildDailyDistributionPipeline,
+  toDate,
+  isDateValid,
+  normalizeMatchDates
 } = require('../utils/queryHelper');
 
 exports.getTeacherWeeklyHours = async (req, res, next) => {
   try {
     const { weekDate } = req.query;
 
-    const baseDate = weekDate ? new Date(weekDate) : new Date();
+    const baseDate = isDateValid(toDate(weekDate)) ? toDate(weekDate) : new Date();
     const { start, end } = getWeekRange(baseDate);
 
-    const match = { ...buildDateQuery(start, end), status: { $ne: 'cancelled' } };
+    const match = normalizeMatchDates({
+      ...buildDateQuery(start, end),
+      status: { $ne: 'cancelled' }
+    });
     const schedules = await Schedule.find(match).populate('teacher', 'name subject title phone');
 
     const teacherMap = new Map();
@@ -95,7 +101,10 @@ exports.getClassroomUtilization = async (req, res, next) => {
     const DAILY_END_MINUTES = 20 * 60;
     const MAX_DAILY_MINUTES = DAILY_END_MINUTES - DAILY_START_MINUTES;
 
-    const match = { ...buildDateQuery(start, end), status: { $ne: 'cancelled' } };
+    const match = normalizeMatchDates({
+      ...buildDateQuery(start, end),
+      status: { $ne: 'cancelled' }
+    });
     const schedules = await Schedule.find(match).populate('classroom', 'name building capacity type');
 
     const classroomMap = new Map();
@@ -193,7 +202,13 @@ exports.getScheduleOverview = async (req, res, next) => {
     const { start, end, startStr, endStr, daysDiff } = parseDateRange(req.query);
 
     const baseQuery = buildDateQuery(start, end);
-    const matchNotCancelled = { ...baseQuery, status: { $ne: 'cancelled' } };
+    const matchNotCancelled = normalizeMatchDates({
+      ...baseQuery,
+      status: { $ne: 'cancelled' }
+    });
+    const scheduledQuery = normalizeMatchDates({ ...baseQuery, status: 'scheduled' });
+    const completedQuery = normalizeMatchDates({ ...baseQuery, status: 'completed' });
+    const cancelledQuery = normalizeMatchDates({ ...baseQuery, status: 'cancelled' });
 
     const [
       totalScheduled,
@@ -203,9 +218,9 @@ exports.getScheduleOverview = async (req, res, next) => {
       courseStats,
       dailyStats
     ] = await Promise.all([
-      Schedule.countDocuments({ ...baseQuery, status: 'scheduled' }),
-      Schedule.countDocuments({ ...baseQuery, status: 'completed' }),
-      Schedule.countDocuments({ ...baseQuery, status: 'cancelled' }),
+      Schedule.countDocuments(scheduledQuery),
+      Schedule.countDocuments(completedQuery),
+      Schedule.countDocuments(cancelledQuery),
       Schedule.aggregate(buildTopListPipeline({ match: matchNotCancelled, field: 'teacher', limit: 10 })),
       Schedule.aggregate(buildTopListPipeline({ match: matchNotCancelled, field: 'course', limit: 10 })),
       Schedule.aggregate(buildDailyDistributionPipeline(matchNotCancelled))
@@ -268,7 +283,7 @@ exports.getCustomAggregate = async (req, res, next) => {
       match.status = status;
     }
 
-    const results = await buildGroupByAggregate({ groupBy, match });
+    const results = await buildGroupByAggregate({ groupBy, match: normalizeMatchDates(match) });
 
     res.status(200).json({
       success: true,

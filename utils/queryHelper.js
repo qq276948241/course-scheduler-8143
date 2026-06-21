@@ -1,19 +1,37 @@
+const mongoose = require('mongoose');
 const Schedule = require('../models/Schedule');
 
+const toDate = (value) => {
+  if (value instanceof Date) return value;
+  if (typeof value === 'string' || typeof value === 'number') {
+    const d = new Date(value);
+    if (!isNaN(d.getTime())) return d;
+  }
+  return null;
+};
+
+const isDateValid = (date) => {
+  if (!(date instanceof Date)) return false;
+  return !isNaN(date.getTime());
+};
+
 const stripTime = (date) => {
-  const d = new Date(date);
+  const d = toDate(date);
+  if (!d) return new Date(NaN);
   d.setHours(0, 0, 0, 0);
   return d;
 };
 
 const endOfDay = (date) => {
-  const d = new Date(date);
+  const d = toDate(date);
+  if (!d) return new Date(NaN);
   d.setHours(23, 59, 59, 999);
   return d;
 };
 
 const nextDay = (date) => {
   const d = stripTime(date);
+  if (!isDateValid(d)) return new Date(NaN);
   d.setDate(d.getDate() + 1);
   return d;
 };
@@ -29,6 +47,10 @@ const calculateDuration = (startTime, endTime) => {
 
 const getWeekRange = (date = new Date()) => {
   const d = stripTime(date);
+  if (!isDateValid(d)) {
+    const fallback = stripTime(new Date());
+    return getWeekRange(fallback);
+  }
   const dayOfWeek = d.getDay() === 0 ? 7 : d.getDay();
   const start = new Date(d);
   start.setDate(d.getDate() - (dayOfWeek - 1));
@@ -40,6 +62,10 @@ const getWeekRange = (date = new Date()) => {
 
 const getMonthRange = (date = new Date()) => {
   const d = stripTime(date);
+  if (!isDateValid(d)) {
+    const fallback = stripTime(new Date());
+    return getMonthRange(fallback);
+  }
   const start = new Date(d.getFullYear(), d.getMonth(), 1);
   const end = new Date(d.getFullYear(), d.getMonth() + 1, 0);
   end.setHours(23, 59, 59, 999);
@@ -55,10 +81,13 @@ const parseDateRange = (query, options = {}) => {
     inclusiveEnd = true
   } = options;
 
-  const { [startParam]: startDate, [endParam]: endDate, [viewParam]: view = defaultView } = query;
+  const { [startParam]: startDateRaw, [endParam]: endDateRaw, [viewParam]: view = defaultView } = query;
 
   let start, end;
-  if (startDate && endDate) {
+  const startDate = toDate(startDateRaw);
+  const endDate = toDate(endDateRaw);
+
+  if (isDateValid(startDate) && isDateValid(endDate)) {
     start = stripTime(startDate);
     end = inclusiveEnd ? endOfDay(endDate) : nextDay(endDate);
   } else if (view === 'month') {
@@ -76,20 +105,35 @@ const parseDateRange = (query, options = {}) => {
     end,
     startStr: start.toISOString().split('T')[0],
     endStr: (inclusiveEnd ? end : new Date(end.getTime() - 86400000)).toISOString().split('T')[0],
-    daysDiff: Math.ceil((endOfDay(end) - start) / (1000 * 60 * 60 * 24))
+    daysDiff: Math.max(1, Math.ceil((endOfDay(end) - start) / (1000 * 60 * 60 * 24)))
   };
+};
+
+const toObjectId = (value) => {
+  if (!value) return value;
+  try {
+    return mongoose.Types.ObjectId(value);
+  } catch (e) {
+    return value;
+  }
 };
 
 const buildDateQuery = (start, end, field = 'date') => {
-  return {
-    [field]: { $gte: start, $lte: end }
-  };
+  const s = toDate(start);
+  const e = toDate(end);
+  const query = {};
+  if (isDateValid(s)) query.$gte = s;
+  if (isDateValid(e)) query.$lte = e;
+  return { [field]: query };
 };
 
 const buildDateQueryLt = (start, end, field = 'date') => {
-  return {
-    [field]: { $gte: start, $lt: end }
-  };
+  const s = toDate(start);
+  const e = toDate(end);
+  const query = {};
+  if (isDateValid(s)) query.$gte = s;
+  if (isDateValid(e)) query.$lt = e;
+  return { [field]: query };
 };
 
 const buildScheduleQuery = (filters = {}) => {
@@ -105,9 +149,9 @@ const buildScheduleQuery = (filters = {}) => {
 
   const query = {};
 
-  if (course) query.course = course;
-  if (teacher) query.teacher = teacher;
-  if (classroom) query.classroom = classroom;
+  if (course) query.course = toObjectId(course);
+  if (teacher) query.teacher = toObjectId(teacher);
+  if (classroom) query.classroom = toObjectId(classroom);
 
   if (status) {
     query.status = status;
@@ -115,10 +159,12 @@ const buildScheduleQuery = (filters = {}) => {
     query.status = { $ne: 'cancelled' };
   }
 
-  if (startDate || endDate) {
+  const s = toDate(startDate);
+  const e = toDate(endDate);
+  if (isDateValid(s) || isDateValid(e)) {
     query.date = {};
-    if (startDate) query.date.$gte = stripTime(startDate);
-    if (endDate) query.date.$lt = nextDay(endDate);
+    if (isDateValid(s)) query.date.$gte = stripTime(s);
+    if (isDateValid(e)) query.date.$lt = nextDay(e);
   }
 
   return query;
@@ -171,11 +217,40 @@ const GROUP_BY_CONFIGS = {
   }
 };
 
+const normalizeMatchDates = (match) => {
+  const result = { ...match };
+  if (result.date && typeof result.date === 'object' && result.date !== null) {
+    const dateFilter = {};
+    if (result.date.$gte !== undefined) {
+      const s = toDate(result.date.$gte);
+      if (isDateValid(s)) dateFilter.$gte = s;
+    }
+    if (result.date.$lte !== undefined) {
+      const e = toDate(result.date.$lte);
+      if (isDateValid(e)) dateFilter.$lte = e;
+    }
+    if (result.date.$lt !== undefined) {
+      const e = toDate(result.date.$lt);
+      if (isDateValid(e)) dateFilter.$lt = e;
+    }
+    if (result.date.$gt !== undefined) {
+      const s = toDate(result.date.$gt);
+      if (isDateValid(s)) dateFilter.$gt = s;
+    }
+    if (Object.keys(dateFilter).length > 0) {
+      result.date = dateFilter;
+    }
+  }
+  return result;
+};
+
 const buildTopListPipeline = ({ match, field, limit = 10, withDuration = false }) => {
   const config = GROUP_BY_CONFIGS[field];
   if (!config) {
     throw new Error(`Invalid group field: ${field}`);
   }
+
+  const normalizedMatch = normalizeMatchDates(match);
 
   const groupStage = {
     _id: config.groupId,
@@ -187,7 +262,7 @@ const buildTopListPipeline = ({ match, field, limit = 10, withDuration = false }
   }
 
   const pipeline = [
-    { $match: match },
+    { $match: normalizedMatch },
     { $group: groupStage },
     { $sort: { classCount: -1 } },
     { $limit: limit }
@@ -244,8 +319,9 @@ const buildGroupByAggregate = ({ groupBy, match }) => {
 };
 
 const buildDailyDistributionPipeline = (match) => {
+  const normalizedMatch = normalizeMatchDates(match);
   return [
-    { $match: match },
+    { $match: normalizedMatch },
     {
       $group: {
         _id: { $dateToString: { format: '%Y-%m-%d', date: '$date' } },
@@ -264,7 +340,10 @@ const buildDailyDistributionPipeline = (match) => {
 };
 
 const calculateDaysDiff = (start, end) => {
-  return Math.ceil((endOfDay(end) - start) / (1000 * 60 * 60 * 24));
+  const s = toDate(start);
+  const e = toDate(end);
+  if (!isDateValid(s) || !isDateValid(e)) return 1;
+  return Math.max(1, Math.ceil((endOfDay(e) - s) / (1000 * 60 * 60 * 24)));
 };
 
 module.exports = {
@@ -284,5 +363,8 @@ module.exports = {
   buildTopListPipeline,
   buildGroupByAggregate,
   buildDailyDistributionPipeline,
-  calculateDaysDiff
+  calculateDaysDiff,
+  toDate,
+  isDateValid,
+  normalizeMatchDates
 };

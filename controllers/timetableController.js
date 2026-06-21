@@ -5,7 +5,8 @@ const {
   parseDateRange,
   buildDateQuery,
   buildDateQueryLt,
-  buildTopListPipeline
+  buildTopListPipeline,
+  normalizeMatchDates
 } = require('../utils/queryHelper');
 
 const buildTimetableQuery = (baseQuery, { start, end }) => {
@@ -42,7 +43,7 @@ exports.getMyTimetable = async (req, res, next) => {
       { start, end }
     );
 
-    const schedules = await Schedule.find(query)
+    const schedules = await Schedule.find(normalizeMatchDates(query))
       .populate('course', 'name code category')
       .populate('teacher', 'name subject')
       .populate('classroom', 'name building')
@@ -76,7 +77,7 @@ exports.getTeacherTimetable = async (req, res, next) => {
       { start, end }
     );
 
-    const schedules = await Schedule.find(query)
+    const schedules = await Schedule.find(normalizeMatchDates(query))
       .populate('course', 'name code category')
       .populate('classroom', 'name building')
       .sort({ date: 1, startTime: 1 });
@@ -109,7 +110,7 @@ exports.getClassroomTimetable = async (req, res, next) => {
       { start, end }
     );
 
-    const schedules = await Schedule.find(query)
+    const schedules = await Schedule.find(normalizeMatchDates(query))
       .populate('course', 'name code category')
       .populate('teacher', 'name subject')
       .sort({ date: 1, startTime: 1 });
@@ -141,15 +142,20 @@ exports.getCourseTimetable = async (req, res, next) => {
     else query.status = { $ne: 'cancelled' };
 
     if (startDate || endDate) {
-      if (startDate) query.date = { ...query.date, $gte: stripTime(startDate) };
+      if (startDate) {
+        const s = stripTime(startDate);
+        if (!isNaN(s.getTime())) query.date = { ...query.date, $gte: s };
+      }
       if (endDate) {
-        const eDate = new Date(endDate);
-        eDate.setDate(eDate.getDate() + 1);
-        query.date = { ...query.date, $lt: eDate };
+        const e = stripTime(endDate);
+        if (!isNaN(e.getTime())) {
+          e.setDate(e.getDate() + 1);
+          query.date = { ...query.date, $lt: e };
+        }
       }
     }
 
-    const schedules = await Schedule.find(query)
+    const schedules = await Schedule.find(normalizeMatchDates(query))
       .populate('teacher', 'name subject')
       .populate('classroom', 'name building capacity')
       .sort({ date: 1, startTime: 1 });
@@ -176,7 +182,7 @@ exports.getOverallTimetable = async (req, res, next) => {
     if (classroom) query.classroom = classroom;
     if (course) query.course = course;
 
-    const schedules = await Schedule.find(query)
+    const schedules = await Schedule.find(normalizeMatchDates(query))
       .populate('course', 'name code category')
       .populate('teacher', 'name subject')
       .populate('classroom', 'name building')
@@ -223,18 +229,22 @@ exports.getTimetableStats = async (req, res, next) => {
     const { start, end, startStr, endStr } = parseDateRange(req.query, { inclusiveEnd: false });
 
     const query = buildDateQuery(start, end);
+    const matchScheduled = normalizeMatchDates({ ...query, status: 'scheduled' });
+    const matchCompleted = normalizeMatchDates({ ...query, status: 'completed' });
+    const matchCancelled = normalizeMatchDates({ ...query, status: 'cancelled' });
+    const matchActive = normalizeMatchDates({ ...query, status: { $ne: 'cancelled' } });
 
     const [totalScheduled, totalCompleted, totalCancelled, teacherStats, classroomStats] = await Promise.all([
-      Schedule.countDocuments({ ...query, status: 'scheduled' }),
-      Schedule.countDocuments({ ...query, status: 'completed' }),
-      Schedule.countDocuments({ ...query, status: 'cancelled' }),
+      Schedule.countDocuments(matchScheduled),
+      Schedule.countDocuments(matchCompleted),
+      Schedule.countDocuments(matchCancelled),
       Schedule.aggregate(buildTopListPipeline({
-        match: { ...query, status: { $ne: 'cancelled' } },
+        match: matchActive,
         field: 'teacher',
         limit: 10
       })),
       Schedule.aggregate(buildTopListPipeline({
-        match: { ...query, status: { $ne: 'cancelled' } },
+        match: matchActive,
         field: 'classroom',
         limit: 10
       }))
