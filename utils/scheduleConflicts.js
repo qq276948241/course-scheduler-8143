@@ -1,9 +1,10 @@
 const Schedule = require('../models/Schedule');
-
-const timeToMinutes = (time) => {
-  const [hours, minutes] = time.split(':').map(Number);
-  return hours * 60 + minutes;
-};
+const {
+  stripTime,
+  timeToMinutes,
+  nextDay,
+  buildDateQueryLt
+} = require('./queryHelper');
 
 const isTimeOverlap = (start1, end1, start2, end2) => {
   const s1 = timeToMinutes(start1);
@@ -13,27 +14,21 @@ const isTimeOverlap = (start1, end1, start2, end2) => {
   return s1 < e2 && s2 < e1;
 };
 
-const stripTime = (date) => {
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  return d;
-};
-
-exports.checkTeacherConflict = async (teacherId, date, startTime, endTime, excludeId = null) => {
+const buildConflictQuery = (field, id, date, excludeId) => {
   const targetDate = stripTime(date);
-  const nextDate = new Date(targetDate);
-  nextDate.setDate(nextDate.getDate() + 1);
-
   const query = {
-    teacher: teacherId,
-    date: { $gte: targetDate, $lt: nextDate },
+    [field]: id,
+    ...buildDateQueryLt(targetDate, nextDay(targetDate)),
     status: { $ne: 'cancelled' }
   };
-
   if (excludeId) {
     query._id = { $ne: excludeId };
   }
+  return query;
+};
 
+exports.checkTeacherConflict = async (teacherId, date, startTime, endTime, excludeId = null) => {
+  const query = buildConflictQuery('teacher', teacherId, date, excludeId);
   const schedules = await Schedule.find(query);
 
   for (const s of schedules) {
@@ -51,20 +46,7 @@ exports.checkTeacherConflict = async (teacherId, date, startTime, endTime, exclu
 };
 
 exports.checkClassroomConflict = async (classroomId, date, startTime, endTime, excludeId = null) => {
-  const targetDate = stripTime(date);
-  const nextDate = new Date(targetDate);
-  nextDate.setDate(nextDate.getDate() + 1);
-
-  const query = {
-    classroom: classroomId,
-    date: { $gte: targetDate, $lt: nextDate },
-    status: { $ne: 'cancelled' }
-  };
-
-  if (excludeId) {
-    query._id = { $ne: excludeId };
-  }
-
+  const query = buildConflictQuery('classroom', classroomId, date, excludeId);
   const schedules = await Schedule.find(query);
 
   for (const s of schedules) {

@@ -1,40 +1,17 @@
 const Schedule = require('../models/Schedule');
 const Teacher = require('../models/Teacher');
 const Classroom = require('../models/Classroom');
-
-const timeToMinutes = (time) => {
-  const [hours, minutes] = time.split(':').map(Number);
-  return hours * 60 + minutes;
-};
-
-const calculateDuration = (startTime, endTime) => {
-  return timeToMinutes(endTime) - timeToMinutes(startTime);
-};
-
-const stripTime = (date) => {
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  return d;
-};
-
-const getWeekRange = (date = new Date()) => {
-  const d = stripTime(date);
-  const dayOfWeek = d.getDay() === 0 ? 7 : d.getDay();
-  const start = new Date(d);
-  start.setDate(d.getDate() - (dayOfWeek - 1));
-  const end = new Date(start);
-  end.setDate(start.getDate() + 6);
-  end.setHours(23, 59, 59, 999);
-  return { start, end };
-};
-
-const getMonthRange = (date = new Date()) => {
-  const d = stripTime(date);
-  const start = new Date(d.getFullYear(), d.getMonth(), 1);
-  const end = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-  end.setHours(23, 59, 59, 999);
-  return { start, end };
-};
+const {
+  stripTime,
+  timeToMinutes,
+  calculateDuration,
+  getWeekRange,
+  parseDateRange,
+  buildDateQuery,
+  buildTopListPipeline,
+  buildGroupByAggregate,
+  buildDailyDistributionPipeline
+} = require('../utils/queryHelper');
 
 exports.getTeacherWeeklyHours = async (req, res, next) => {
   try {
@@ -43,10 +20,8 @@ exports.getTeacherWeeklyHours = async (req, res, next) => {
     const baseDate = weekDate ? new Date(weekDate) : new Date();
     const { start, end } = getWeekRange(baseDate);
 
-    const schedules = await Schedule.find({
-      date: { $gte: start, $lte: end },
-      status: { $ne: 'cancelled' }
-    }).populate('teacher', 'name subject title phone');
+    const match = { ...buildDateQuery(start, end), status: { $ne: 'cancelled' } };
+    const schedules = await Schedule.find(match).populate('teacher', 'name subject title phone');
 
     const teacherMap = new Map();
 
@@ -113,33 +88,15 @@ exports.getTeacherWeeklyHours = async (req, res, next) => {
 
 exports.getClassroomUtilization = async (req, res, next) => {
   try {
-    const { startDate, endDate, view = 'week' } = req.query;
+    const { start, end, startStr, endStr, daysDiff } = parseDateRange(req.query);
 
-    let start, end;
-    if (startDate && endDate) {
-      start = stripTime(startDate);
-      end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-    } else if (view === 'month') {
-      const range = getMonthRange();
-      start = range.start;
-      end = range.end;
-    } else {
-      const range = getWeekRange();
-      start = range.start;
-      end = range.end;
-    }
-
-    const daysDiff = Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1;
     const DAILY_WORKING_HOURS = 12;
     const DAILY_START_MINUTES = 8 * 60;
     const DAILY_END_MINUTES = 20 * 60;
     const MAX_DAILY_MINUTES = DAILY_END_MINUTES - DAILY_START_MINUTES;
 
-    const schedules = await Schedule.find({
-      date: { $gte: start, $lte: end },
-      status: { $ne: 'cancelled' }
-    }).populate('classroom', 'name building capacity type');
+    const match = { ...buildDateQuery(start, end), status: { $ne: 'cancelled' } };
+    const schedules = await Schedule.find(match).populate('classroom', 'name building capacity type');
 
     const classroomMap = new Map();
 
@@ -206,8 +163,8 @@ exports.getClassroomUtilization = async (req, res, next) => {
       success: true,
       data: {
         dateRange: {
-          start: start.toISOString().split('T')[0],
-          end: end.toISOString().split('T')[0],
+          start: startStr,
+          end: endStr,
           days: daysDiff
         },
         settings: {
@@ -233,22 +190,10 @@ exports.getClassroomUtilization = async (req, res, next) => {
 
 exports.getScheduleOverview = async (req, res, next) => {
   try {
-    const { startDate, endDate } = req.query;
+    const { start, end, startStr, endStr, daysDiff } = parseDateRange(req.query);
 
-    let start, end;
-    if (startDate && endDate) {
-      start = stripTime(startDate);
-      end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-    } else {
-      const range = getMonthRange();
-      start = range.start;
-      end = range.end;
-    }
-
-    const daysDiff = Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1;
-
-    const baseQuery = { date: { $gte: start, $lte: end } };
+    const baseQuery = buildDateQuery(start, end);
+    const matchNotCancelled = { ...baseQuery, status: { $ne: 'cancelled' } };
 
     const [
       totalScheduled,
@@ -261,97 +206,16 @@ exports.getScheduleOverview = async (req, res, next) => {
       Schedule.countDocuments({ ...baseQuery, status: 'scheduled' }),
       Schedule.countDocuments({ ...baseQuery, status: 'completed' }),
       Schedule.countDocuments({ ...baseQuery, status: 'cancelled' }),
-
-      Schedule.aggregate([
-        { $match: { ...baseQuery, status: { $ne: 'cancelled' } } },
-        {
-          $group: {
-            _id: '$teacher',
-            classCount: { $sum: 1 }
-          }
-        },
-        { $sort: { classCount: -1 } },
-        { $limit: 10 },
-        {
-          $lookup: {
-            from: 'teachers',
-            localField: '_id',
-            foreignField: '_id',
-            as: 'info'
-          }
-        },
-        { $unwind: '$info' },
-        {
-          $project: {
-            _id: 0,
-            teacherId: '$_id',
-            name: '$info.name',
-            subject: '$info.subject',
-            classCount: 1
-          }
-        }
-      ]),
-
-      Schedule.aggregate([
-        { $match: { ...baseQuery, status: { $ne: 'cancelled' } } },
-        {
-          $group: {
-            _id: '$course',
-            classCount: { $sum: 1 }
-          }
-        },
-        { $sort: { classCount: -1 } },
-        { $limit: 10 },
-        {
-          $lookup: {
-            from: 'courses',
-            localField: '_id',
-            foreignField: '_id',
-            as: 'info'
-          }
-        },
-        { $unwind: '$info' },
-        {
-          $project: {
-            _id: 0,
-            courseId: '$_id',
-            name: '$info.name',
-            code: '$info.code',
-            classCount: 1
-          }
-        }
-      ]),
-
-      Schedule.aggregate([
-        { $match: { ...baseQuery, status: { $ne: 'cancelled' } } },
-        {
-          $group: {
-            _id: {
-              $dateToString: { format: '%Y-%m-%d', date: '$date' }
-            },
-            classCount: { $sum: 1 }
-          }
-        },
-        { $sort: { _id: 1 } },
-        {
-          $project: {
-            _id: 0,
-            date: '$_id',
-            classCount: 1
-          }
-        }
-      ])
+      Schedule.aggregate(buildTopListPipeline({ match: matchNotCancelled, field: 'teacher', limit: 10 })),
+      Schedule.aggregate(buildTopListPipeline({ match: matchNotCancelled, field: 'course', limit: 10 })),
+      Schedule.aggregate(buildDailyDistributionPipeline(matchNotCancelled))
     ]);
 
     const total = totalScheduled + totalCompleted + totalCancelled;
     const cancellationRate = total > 0 ? Math.round((totalCancelled / total) * 10000) / 100 : 0;
     const completionRate = total > 0 ? Math.round((totalCompleted / total) * 10000) / 100 : 0;
 
-    const schedules = await Schedule.find({
-      ...baseQuery,
-      status: { $ne: 'cancelled' }
-    });
-
+    const schedules = await Schedule.find(matchNotCancelled);
     let totalMinutes = 0;
     schedules.forEach(s => {
       totalMinutes += calculateDuration(s.startTime, s.endTime);
@@ -366,8 +230,8 @@ exports.getScheduleOverview = async (req, res, next) => {
       success: true,
       data: {
         dateRange: {
-          start: start.toISOString().split('T')[0],
-          end: end.toISOString().split('T')[0],
+          start: startStr,
+          end: endStr,
           days: daysDiff
         },
         overview: {
@@ -396,135 +260,26 @@ exports.getScheduleOverview = async (req, res, next) => {
 
 exports.getCustomAggregate = async (req, res, next) => {
   try {
-    const { groupBy, startDate, endDate, status } = req.query;
+    const { groupBy = 'teacher', status } = req.query;
+    const { start, end, startStr, endStr } = parseDateRange(req.query);
 
-    let start, end;
-    if (startDate && endDate) {
-      start = stripTime(startDate);
-      end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-    } else {
-      const range = getMonthRange();
-      start = range.start;
-      end = range.end;
-    }
-
-    const match = { date: { $gte: start, $lte: end } };
+    const match = buildDateQuery(start, end);
     if (status && status !== 'all') {
       match.status = status;
     }
 
-    let groupId;
-    let lookupCollection;
-    let lookupFields;
-
-    switch (groupBy) {
-      case 'teacher':
-        groupId = '$teacher';
-        lookupCollection = 'teachers';
-        lookupFields = { name: 1, subject: 1, title: 1 };
-        break;
-      case 'classroom':
-        groupId = '$classroom';
-        lookupCollection = 'classrooms';
-        lookupFields = { name: 1, building: 1, type: 1 };
-        break;
-      case 'course':
-        groupId = '$course';
-        lookupCollection = 'courses';
-        lookupFields = { name: 1, code: 1, category: 1 };
-        break;
-      case 'status':
-        groupId = '$status';
-        break;
-      case 'date':
-        groupId = { $dateToString: { format: '%Y-%m-%d', date: '$date' } };
-        break;
-      default:
-        groupId = '$teacher';
-        lookupCollection = 'teachers';
-        lookupFields = { name: 1, subject: 1 };
-    }
-
-    const pipeline = [
-      { $match: match },
-      {
-        $group: {
-          _id: groupId,
-          classCount: { $sum: 1 },
-          totalMinutes: {
-            $sum: {
-              $subtract: [
-                { $add: [{ $multiply: [{ $toInt: { $substrCP: ['$endTime', 0, 2] } }, 60] }, { $toInt: { $substrCP: ['$endTime', 3, 2] } }] },
-                { $add: [{ $multiply: [{ $toInt: { $substrCP: ['$startTime', 0, 2] } }, 60] }, { $toInt: { $substrCP: ['$startTime', 3, 2] } }] }
-              ]
-            }
-          }
-        }
-      },
-      { $sort: { classCount: -1 } }
-    ];
-
-    if (lookupCollection) {
-      pipeline.push({
-        $lookup: {
-          from: lookupCollection,
-          localField: '_id',
-          foreignField: '_id',
-          as: 'info'
-        }
-      });
-      pipeline.push({ $unwind: { path: '$info', preserveNullAndEmptyArrays: true } });
-
-      const project = {
-        _id: 0,
-        count: '$classCount',
-        totalMinutes: 1,
-        totalHours: { $round: [{ $divide: ['$totalMinutes', 60] }, 2] }
-      };
-
-      if (groupBy === 'teacher') {
-        project.teacherId = '$_id';
-        project.name = '$info.name';
-        project.subject = '$info.subject';
-        project.title = '$info.title';
-      } else if (groupBy === 'classroom') {
-        project.classroomId = '$_id';
-        project.name = '$info.name';
-        project.building = '$info.building';
-        project.type = '$info.type';
-      } else if (groupBy === 'course') {
-        project.courseId = '$_id';
-        project.name = '$info.name';
-        project.code = '$info.code';
-        project.category = '$info.category';
-      }
-
-      pipeline.push({ $project: project });
-    } else {
-      pipeline.push({
-        $project: {
-          _id: 0,
-          [groupBy]: '$_id',
-          count: '$classCount',
-          totalMinutes: 1,
-          totalHours: { $round: [{ $divide: ['$totalMinutes', 60] }, 2] }
-        }
-      });
-    }
-
-    const result = await Schedule.aggregate(pipeline);
+    const results = await buildGroupByAggregate({ groupBy, match });
 
     res.status(200).json({
       success: true,
       data: {
         groupBy,
         dateRange: {
-          start: start.toISOString().split('T')[0],
-          end: end.toISOString().split('T')[0]
+          start: startStr,
+          end: endStr
         },
-        totalRecords: result.length,
-        results: result
+        totalRecords: results.length,
+        results
       }
     });
   } catch (err) {

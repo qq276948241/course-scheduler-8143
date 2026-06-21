@@ -4,6 +4,7 @@ const Teacher = require('../models/Teacher');
 const Classroom = require('../models/Classroom');
 const Enrollment = require('../models/Enrollment');
 const { checkAllConflicts, generateRepeatDates } = require('../utils/scheduleConflicts');
+const { buildScheduleQuery } = require('../utils/queryHelper');
 
 exports.createSchedule = async (req, res, next) => {
   try {
@@ -100,32 +101,9 @@ exports.createSchedule = async (req, res, next) => {
 
 exports.getAllSchedules = async (req, res, next) => {
   try {
-    const {
-      page = 1,
-      limit = 20,
-      course,
-      teacher,
-      classroom,
-      status,
-      startDate,
-      endDate
-    } = req.query;
+    const { page = 1, limit = 20 } = req.query;
 
-    const query = {};
-    if (course) query.course = course;
-    if (teacher) query.teacher = teacher;
-    if (classroom) query.classroom = classroom;
-    if (status) query.status = status;
-
-    if (startDate || endDate) {
-      query.date = {};
-      if (startDate) query.date.$gte = new Date(startDate);
-      if (endDate) {
-        const eDate = new Date(endDate);
-        eDate.setDate(eDate.getDate() + 1);
-        query.date.$lt = eDate;
-      }
-    }
+    const query = buildScheduleQuery(req.query);
 
     const schedules = await Schedule.find(query)
       .populate('course', 'name code category')
