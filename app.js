@@ -19,6 +19,7 @@ app.use('/api/v1/courses', require('./routes/courses'));
 app.use('/api/v1/schedules', require('./routes/schedules'));
 app.use('/api/v1/enrollments', require('./routes/enrollments'));
 app.use('/api/v1/timetables', require('./routes/timetables'));
+app.use('/api/v1/stats', require('./routes/stats'));
 
 app.get('/api/v1/health', (req, res) => {
   res.status(200).json({
@@ -42,7 +43,8 @@ app.get('/', (req, res) => {
         courses: '/api/v1/courses',
         schedules: '/api/v1/schedules',
         enrollments: '/api/v1/enrollments',
-        timetables: '/api/v1/timetables'
+        timetables: '/api/v1/timetables',
+        stats: '/api/v1/stats'
       }
     }
   });
